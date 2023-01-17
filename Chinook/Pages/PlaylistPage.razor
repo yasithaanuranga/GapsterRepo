@@ -1,12 +1,22 @@
 ﻿@page "/playlist/{PlaylistId:long}"
 @attribute [Authorize]
 
+@using Chinook.Common;
 @using Chinook.Models
 @using Microsoft.EntityFrameworkCore
 @using System.Security.Claims;
+@inject IJSRuntime JsRuntime
+@inject NavigationManager NavManager
 
-<h1>Playlist <strong>@Playlist.Name</strong></h1>
-
+<h1>
+    Playlist <strong>@Playlist.Name</strong>
+    <a href="#" class="m-1" title="Rename Play List" @onclick="@(()=>OpenPlaylistRename())" @onclick:preventDefault>
+        <i class=" bi bi-pencil-square"></i>
+    </a>
+    <a href="#" class="m-1" title="Delete PlayList" @onclick="@(()=>DeletePlaylist())" @onclick:preventDefault>
+        <i class="bi bi-trash"></i>
+    </a>
+</h1>
 @if (!string.IsNullOrWhiteSpace(InfoMessage))
 {
     <div class="alert alert-info fade show">
@@ -21,7 +31,7 @@
 
 @if (Playlist == null)
 {
-     <Loading />
+    <Loading />
 }
 else
 {
@@ -30,7 +40,7 @@ else
             <tr>
                 <th>Track</th>
                 <th></th>
-        </tr>
+            </tr>
         </thead>
         <tbody>
             @foreach (var track in Playlist.Tracks)
@@ -60,15 +70,47 @@ else
     </table>
 }
 
+
+
+<Modal @ref="PlaylistDialog">
+    <Title>
+        Rename playlist
+    </Title>
+    <Body>
+
+
+
+        <div class="form-group mb-2">
+            <label for="NewPlaylist">New Playlist Name</label>
+            <input type="text" id="NewPlaylist" class="form-control" placeholder="New name for the  playlist" @bind-value="NewName">
+        </div>
+    </Body>
+    <Footer>
+        <button class="btn btn-success" @onclick="RenamePaylist">Save</button>
+    </Footer>
+</Modal>
+
+
+
+
 @code {
     [Parameter] public long PlaylistId { get; set; }
     [Inject] IDbContextFactory<ChinookContext> DbFactory { get; set; }
     [CascadingParameter] private Task<AuthenticationState> authenticationState { get; set; }
+    [Inject] Chinook.Repository.IPlayListRepo playListRepo { get; set; }
+    [Inject] Chinook.Repository.IUserPlaylistRepo userPlaylistRepo { get; set; }
+    [Inject] private Chinook.Repository.ITrackRepo trackRepo { get; set; }
 
     private Chinook.ClientModels.Playlist Playlist;
     private string CurrentUserId;
     private string InfoMessage;
+    private Modal PlaylistDialog { get; set; }
 
+    private string? NewName;
+    /// <summary>
+    /// 
+    /// </summary>
+    /// <returns></returns>
     protected override async Task OnInitializedAsync()
     {
         CurrentUserId = await GetUserId();
@@ -76,35 +118,30 @@ else
         await InvokeAsync(StateHasChanged);
         var DbContext = await DbFactory.CreateDbContextAsync();
 
-        Playlist = DbContext.Playlists
-            .Include(a => a.Tracks).ThenInclude(a => a.Album).ThenInclude(a => a.Artist)
-            .Where(p => p.PlaylistId == PlaylistId)
-            .Select(p => new ClientModels.Playlist()
-                {
-                    Name = p.Name,
-                    Tracks = p.Tracks.Select(t => new ClientModels.PlaylistTrack()
-                    {
-                        AlbumTitle = t.Album.Title,
-                        ArtistName = t.Album.Artist.Name,
-                        TrackId = t.TrackId,
-                        TrackName = t.Name,
-                        IsFavorite = t.Playlists.Where(p => p.UserPlaylists.Any(up => up.UserId == CurrentUserId && up.Playlist.Name == "Favorites")).Any()
-                    }).ToList()
-                })
-            .FirstOrDefault();
+        Playlist = await playListRepo.GetWithOtherDataForPlaylistId(PlaylistId, CurrentUserId);
+
     }
 
     private async Task<string> GetUserId()
     {
+        //fetch the user id
         var user = (await authenticationState).User;
         var userId = user.FindFirst(u => u.Type.Contains(ClaimTypes.NameIdentifier))?.Value;
         return userId;
     }
 
-    private void FavoriteTrack(long trackId)
+    private async void FavoriteTrack(long trackId)
     {
-        var track = Playlist.Tracks.FirstOrDefault(t => t.TrackId == trackId);
-        InfoMessage = $"Track {track.ArtistName} - {track.AlbumTitle} - {track.TrackName} added to playlist Favorites.";
+        var pl1 = playListRepo.GetByName(CommonVariables.MyFavoriteTracks).Result;
+        var pl = playListRepo.GetWithTrack(pl1.PlaylistId).Result;
+        var t = trackRepo.Get(trackId).Result;
+
+        pl.Tracks.Add(t);
+        playListRepo.UpdateAsync(pl);
+
+        InfoMessage = $"Track {t.Name} Added to Playlist {pl.Name}";
+
+        Playlist = await playListRepo.GetWithOtherDataForPlaylistId(PlaylistId, CurrentUserId);
     }
 
     private void UnfavoriteTrack(long trackId)
@@ -113,15 +150,74 @@ else
         InfoMessage = $"Track {track.ArtistName} - {track.AlbumTitle} - {track.TrackName} removed from playlist Favorites.";
     }
 
-    private void RemoveTrack(long trackId)
+    /// <summary>
+    /// Removes the track.
+    /// </summary>
+    /// <param name="trackId">The track identifier.</param>
+    private async void RemoveTrack(long trackId)
     {
         CloseInfoMessage();
 
+        var pl = await playListRepo.GetWithTrack(PlaylistId);
+        var t = pl.Tracks.Where(g => g.TrackId == trackId).FirstOrDefault();
+
+        // Confirm message box
+        bool confirmed = await JsRuntime.InvokeAsync<bool>("confirm", $"Would you like to delete Track {t.Name}");
+        if (true)
+        {
+            pl.Tracks.Remove(t);
+            playListRepo.UpdateAsync(pl);
+
+            InfoMessage = $"Track {t.Name} Deleted from Playlist {pl.Name}";
+        }
+        Playlist = await playListRepo.GetWithOtherDataForPlaylistId(PlaylistId, CurrentUserId);
     }
+
 
     private void CloseInfoMessage()
     {
         InfoMessage = "";
     }
 
+   //Rename The Playlist
+    private async void RenamePaylist()
+    {
+        if (!String.IsNullOrEmpty(NewName))
+        {
+            var pl = await playListRepo.Get(PlaylistId);
+            pl.Name = NewName;
+
+            playListRepo.UpdateAsync(pl);
+            PlaylistDialog.Close();
+            InfoMessage = "Name Updated";
+            Playlist = await playListRepo.GetWithOtherDataForPlaylistId(PlaylistId, CurrentUserId);
+        }
+
+        else
+        {
+            InfoMessage = "Invalid Name";
+        }
+    }
+    
+   // Delete The play list
+    private async void DeletePlaylist()
+    {
+        var pl = await playListRepo.Get(PlaylistId);
+        var userPlay = await userPlaylistRepo.Get(PlaylistId, (await GetUserId()));
+        bool confirmed = await JsRuntime.InvokeAsync<bool>("confirm", $"Would you like to delete playlist {pl.Name}");
+        if (confirmed)
+        {
+            userPlaylistRepo.Delete(userPlay);
+            NavManager.NavigateTo("/");
+        }
+
+    }
+
+
+    private void OpenPlaylistRename()
+    {
+        NewName = Playlist.Name;
+        CloseInfoMessage();
+        PlaylistDialog.Open();
+    }
 }
