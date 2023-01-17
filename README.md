@@ -26,3 +26,6 @@ Summery
 6. User should be able to rename the playlist - Done
 6. User should be able to remove the whole playlist - Done
 7. Search for artist name - Done
+
+
+new play list will be create if the text box have any values
